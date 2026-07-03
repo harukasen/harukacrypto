@@ -255,6 +255,9 @@ fn pack_message(py: Python<'_>, msg_id: i64, seq_no: i32, body: &[u8], salt: i64
         data_slice.copy_from_slice(&body);
         let _ = getrandom::getrandom(padding);
 
+        // https://core.telegram.org/mtproto/description
+        // msg_key = SHA256(auth_key[88+x:88+x+32] + plaintext)[8:24]
+        // x=0 for outgoing (client→server), so auth_key[88:120]
         let msg_key_large = {
             let mut h = Sha256::new();
             h.update(&auth_key[MSG_KEY_AUTH_LO..MSG_KEY_AUTH_HI]);
@@ -274,7 +277,8 @@ fn pack_message(py: Python<'_>, msg_id: i64, seq_no: i32, body: &[u8], salt: i64
 }
 
 #[pyfunction]
-fn unpack_message(py: Python<'_>, packed: &[u8], session_id: &[u8], auth_key: &[u8], auth_key_id: &[u8]) -> PyResult<(i64, i32, i32, Vec<u8>, i32)> {
+#[pyo3(signature = (packed, session_id, auth_key, auth_key_id, incoming=true))]
+fn unpack_message(py: Python<'_>, packed: &[u8], session_id: &[u8], auth_key: &[u8], auth_key_id: &[u8], incoming: bool) -> PyResult<(i64, i32, i32, Vec<u8>, i32)> {
     if packed.len() < 24 {
         return Err(PyValueError::new_err("packed data too short"));
     }
@@ -284,12 +288,13 @@ fn unpack_message(py: Python<'_>, packed: &[u8], session_id: &[u8], auth_key: &[
     let packed = packed.to_vec();
     let session_id = session_id.to_vec();
     let auth_key = auth_key.to_vec();
+    let x: usize = if incoming { 8 } else { 0 };
 
     py.detach(move || {
         let msg_key = &packed[8..24];
         let encrypted = &packed[24..];
 
-        let (aes_key, aes_iv) = kdf_inner(&auth_key, msg_key, 8);
+        let (aes_key, aes_iv) = kdf_inner(&auth_key, msg_key, x);
         let cipher = Aes256::new_from_slice(&aes_key).unwrap();
         let mut dec = encrypted.to_vec();
         ige256_decrypt_slice(&mut dec, &cipher, &aes_iv);
@@ -298,11 +303,19 @@ fn unpack_message(py: Python<'_>, packed: &[u8], session_id: &[u8], auth_key: &[
             return Err(PyValueError::new_err("msg_key mismatch"));
         }
 
+        // https://core.telegram.org/mtproto/description
+        // msg_key = SHA256(auth_key[88+x:88+x+32] + plaintext + padding)[8:24]
+        // where x=0 for client->server (outgoing), x=8 for server->client (incoming)
         // https://core.telegram.org/mtproto/security_guidelines#checking-sha256-hash-value-of-msg-key
-        // msg_key must equal SHA256(auth_key[88:120] + plaintext)[8:24]
+        // Note: the security guidelines page incorrectly omits the x offset (always shows 88:120)
+        let (msg_key_lo, msg_key_hi) = if incoming {
+            (96usize, 128usize)
+        } else {
+            (88usize, 120usize)
+        };
         let msg_key_check = {
             let mut h = Sha256::new();
-            h.update(&auth_key[MSG_KEY_AUTH_LO..MSG_KEY_AUTH_HI]);
+            h.update(&auth_key[msg_key_lo..msg_key_hi]);
             h.update(&dec);
             h.finalize()
         };

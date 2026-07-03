@@ -126,30 +126,34 @@ class TestPackMessage(unittest.TestCase):
     AUTH_KEY = bytes(range(256))
     AUTH_KEY_ID = __import__("hashlib").sha256(AUTH_KEY).digest()[-8:]
     SESSION_ID = os.urandom(8)
+    SALT = 1234567890
+
+    def pack(self, body: bytes, msg_id: int = 0, seq_no: int = 0):
+        return warpcrypto.pack_message(msg_id, seq_no, body, self.SALT, self.SESSION_ID, self.AUTH_KEY, self.AUTH_KEY_ID)
 
     def test_pack_has_auth_key_id(self):
-        packed = warpcrypto.pack_message(b"test", 0, self.SESSION_ID, self.AUTH_KEY, self.AUTH_KEY_ID)
+        packed = self.pack(b"test")
         self.assertEqual(packed[:8], self.AUTH_KEY_ID)
 
     def test_pack_has_msg_key(self):
-        packed = warpcrypto.pack_message(b"test", 0, self.SESSION_ID, self.AUTH_KEY, self.AUTH_KEY_ID)
+        packed = self.pack(b"test")
         self.assertEqual(len(packed[8:24]), 16)
 
     def test_pack_16_byte_aligned(self):
-        packed = warpcrypto.pack_message(b"test", 0, self.SESSION_ID, self.AUTH_KEY, self.AUTH_KEY_ID)
+        packed = self.pack(b"test")
         self.assertEqual((len(packed) - 8) % 16, 0)
 
     def test_pack_unique(self):
         results = set()
-        for _ in range(10):
-            p = bytes(warpcrypto.pack_message(b"test", 0, self.SESSION_ID, self.AUTH_KEY, self.AUTH_KEY_ID))
+        for i in range(10):
+            p = bytes(self.pack(b"test", msg_id=i))
             results.add(p)
         self.assertEqual(len(results), 10)
 
     def test_pack_various_sizes(self):
         for size in [0, 1, 16, 100, 1000]:
             payload = os.urandom(size)
-            packed = warpcrypto.pack_message(payload, 0, self.SESSION_ID, self.AUTH_KEY, self.AUTH_KEY_ID)
+            packed = self.pack(payload)
             self.assertGreater(len(packed), 24)
             self.assertEqual((len(packed) - 8) % 16, 0)
 
@@ -158,15 +162,43 @@ class TestUnpackMessage(unittest.TestCase):
     AUTH_KEY = bytes(range(256))
     AUTH_KEY_ID = __import__("hashlib").sha256(AUTH_KEY).digest()[-8:]
     SESSION_ID = os.urandom(8)
+    SALT = 1234567890
+
+    def pack(self, body: bytes, msg_id: int = 0, seq_no: int = 0):
+        return warpcrypto.pack_message(msg_id, seq_no, body, self.SALT, self.SESSION_ID, self.AUTH_KEY, self.AUTH_KEY_ID)
+
+    def test_unpack_roundtrip(self):
+        payload = os.urandom(50)
+        packed = self.pack(payload, msg_id=42, seq_no=7)
+        # outgoing=False because pack uses x=0 (client→server), so unpack must also use x=0
+        msg_id, seq_no, length, body, total_len = warpcrypto.unpack_message(
+            packed, self.SESSION_ID, self.AUTH_KEY, self.AUTH_KEY_ID, incoming=False
+        )
+        self.assertEqual(msg_id, 42)
+        self.assertEqual(seq_no, 7)
+        self.assertEqual(length, 50)
+        self.assertEqual(body, payload)
+        self.assertGreater(total_len, 0)
+
+    def test_unpack_incoming_realistic(self):
+        # Simulate server→client: use incoming=True (x=8) with a self-consistency check
+        payload = b"hello from server"
+        # Build using outgoing logic, then verify incoming check uses different auth_key range
+        packed = self.pack(payload, msg_id=99, seq_no=3)
+        # This should NOT match because pack uses auth_key[88:120], unpack(incoming=True) uses [96:128]
+        with self.assertRaises(ValueError):
+            warpcrypto.unpack_message(
+                packed, self.SESSION_ID, self.AUTH_KEY, self.AUTH_KEY_ID, incoming=True
+            )
 
     def test_unpack_invalid_auth_key_id(self):
-        packed = warpcrypto.pack_message(b"test", 0, self.SESSION_ID, self.AUTH_KEY, self.AUTH_KEY_ID)
+        packed = self.pack(b"test")
         bad_key_id = os.urandom(8)
         with self.assertRaises(ValueError):
             warpcrypto.unpack_message(packed, self.SESSION_ID, self.AUTH_KEY, bad_key_id)
 
     def test_unpack_invalid_session_id(self):
-        packed = warpcrypto.pack_message(b"test", 0, self.SESSION_ID, self.AUTH_KEY, self.AUTH_KEY_ID)
+        packed = self.pack(b"test")
         bad_sid = os.urandom(8)
         with self.assertRaises(ValueError):
             warpcrypto.unpack_message(packed, bad_sid, self.AUTH_KEY, self.AUTH_KEY_ID)
@@ -174,6 +206,22 @@ class TestUnpackMessage(unittest.TestCase):
     def test_unpack_too_short(self):
         with self.assertRaises(ValueError):
             warpcrypto.unpack_message(b"", self.SESSION_ID, self.AUTH_KEY, self.AUTH_KEY_ID)
+
+    def test_unpack_tampered_body(self):
+        payload = b"hello"
+        packed = bytearray(self.pack(payload))
+        # Flip a bit in the encrypted portion
+        packed[30] ^= 0x01
+        with self.assertRaises(ValueError):
+            warpcrypto.unpack_message(bytes(packed), self.SESSION_ID, self.AUTH_KEY, self.AUTH_KEY_ID)
+
+    def test_unpack_wrong_msg_key(self):
+        payload = b"test"
+        packed = bytearray(self.pack(payload))
+        # Flip a bit in the msg_key
+        packed[10] ^= 0x01
+        with self.assertRaises(ValueError):
+            warpcrypto.unpack_message(bytes(packed), self.SESSION_ID, self.AUTH_KEY, self.AUTH_KEY_ID)
 
 
 if __name__ == "__main__":

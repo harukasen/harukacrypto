@@ -47,10 +47,10 @@ jobs:
           merge-multiple: true
           path: dist
 
+      - name: Install uv
+        run: pip install uv
+
       - name: Publish to PyPI
-        uses: PyO3/maturin-action@v1
-        with:
-          command: upload
-          args: --non-interactive --skip-existing dist/*
+        run: uv publish dist/*
         env:
-          MATURIN_PYPI_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+          UV_PUBLISH_TOKEN: ${{ secrets.PYPI_API_TOKEN }}

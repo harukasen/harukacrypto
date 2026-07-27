@@ -309,7 +309,7 @@ fn ctr256_encrypt_batch(
                 sz_bytes[i * 4 + 2],
                 sz_bytes[i * 4 + 3],
             ]) as usize;
-            total += sz;
+            total = total.checked_add(sz).ok_or_else(|| PyValueError::new_err("total data size overflow"))?;
             offsets.push(total);
         }
     }
@@ -329,7 +329,9 @@ fn ctr256_encrypt_batch(
             let mut ctr = [0u8; 16];
             ctr.copy_from_slice(&iv_bytes[i * 16..][..16]);
             ctrs.push(ctr);
-            state_offs.push(st_bytes[i] as usize);
+            let mut s = st_bytes[i] as usize;
+            if s >= 16 { s = 0; }
+            state_offs.push(s);
         }
     }
 
@@ -366,6 +368,7 @@ fn ctr256_decrypt_batch(
 
 #[pyfunction]
 fn kdf(auth_key: &[u8], msg_key: &[u8], outgoing: bool) -> PyResult<(Vec<u8>, Vec<u8>)> {
+    if auth_key.len() != 256 { return Err(PyValueError::new_err("auth_key must be 256 bytes")); }
     let x: usize = if outgoing { 0 } else { 8 };
     let (key_arr, iv_arr) = kdf_inner(auth_key, msg_key, x);
     Ok((key_arr.to_vec(), iv_arr.to_vec()))
@@ -373,6 +376,8 @@ fn kdf(auth_key: &[u8], msg_key: &[u8], outgoing: bool) -> PyResult<(Vec<u8>, Ve
 
 #[pyfunction]
 fn pack_message(py: Python<'_>, msg_id: i64, seq_no: i32, body: &[u8], salt: i64, session_id: &[u8], auth_key: &[u8], auth_key_id: &[u8]) -> PyResult<Vec<u8>> {
+    if auth_key.len() != 256 { return Err(PyValueError::new_err("auth_key must be 256 bytes")); }
+    if auth_key_id.len() != 8 { return Err(PyValueError::new_err("auth_key_id must be 8 bytes")); }
     let body = body.to_vec();
     let session_id = session_id.to_vec();
     let auth_key = auth_key.to_vec();
@@ -424,6 +429,8 @@ fn pack_message(py: Python<'_>, msg_id: i64, seq_no: i32, body: &[u8], salt: i64
 #[pyfunction]
 #[pyo3(signature = (packed, session_id, auth_key, auth_key_id, incoming=true))]
 fn unpack_message(py: Python<'_>, packed: &[u8], session_id: &[u8], auth_key: &[u8], auth_key_id: &[u8], incoming: bool) -> PyResult<(i64, i32, i32, Vec<u8>, i32)> {
+    if auth_key.len() != 256 { return Err(PyValueError::new_err("auth_key must be 256 bytes")); }
+    if auth_key_id.len() != 8 { return Err(PyValueError::new_err("auth_key_id must be 8 bytes")); }
     if packed.len() < 24 {
         return Err(PyValueError::new_err("packed data too short"));
     }
@@ -444,7 +451,7 @@ fn unpack_message(py: Python<'_>, packed: &[u8], session_id: &[u8], auth_key: &[
         let mut dec = encrypted.to_vec();
         ige256_decrypt_slice(&mut dec, &cipher, &aes_iv);
 
-        if dec.len() < 16 {
+        if dec.len() < 32 {
             return Err(PyValueError::new_err("msg_key mismatch"));
         }
 
@@ -474,7 +481,14 @@ fn unpack_message(py: Python<'_>, packed: &[u8], session_id: &[u8], auth_key: &[
         }
         let msg_id = i64::from_le_bytes(dec[16..24].try_into().unwrap());
         let seq_no = i32::from_le_bytes(dec[24..28].try_into().unwrap());
-        let length = i32::from_le_bytes(dec[28..32].try_into().unwrap()) as usize;
+        let length_i32 = i32::from_le_bytes(dec[28..32].try_into().unwrap());
+        if length_i32 < 0 {
+            return Err(PyValueError::new_err("negative body length"));
+        }
+        let length = length_i32 as usize;
+        if 32 + length > dec.len() {
+            return Err(PyValueError::new_err("body length exceeds decrypted data"));
+        }
         let body = dec[32..32 + length].to_vec();
         let total_len = dec[16..].len() as i32;
         Ok((msg_id, seq_no, length as i32, body, total_len))

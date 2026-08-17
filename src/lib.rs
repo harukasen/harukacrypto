@@ -1,10 +1,11 @@
-use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit};
+use aes::cipher::{BlockBackend, BlockClosure, BlockDecrypt, BlockEncrypt, BlockSizeUser, KeyInit};
+use aes::cipher::inout::InOut;
 use aes::Aes256;
 use aes::cipher::generic_array::GenericArray;
 use aes::cipher::typenum::U16;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::PyByteArray;
+use pyo3::types::{PyByteArray, PyBytes};
 use sha2::{Digest, Sha256};
 
 type AesBlock = GenericArray<u8, U16>;
@@ -17,47 +18,68 @@ fn block_from_slice(s: &[u8]) -> AesBlock {
 }
 
 #[inline(always)]
-fn xor_bytes(a: &mut [u8], b: &[u8]) {
-    for (ai, &bi) in a.iter_mut().zip(b.iter()) {
-        *ai ^= bi;
+fn word_at(s: &[u8], at: usize) -> u128 {
+    u128::from_ne_bytes(s[at..at + 16].try_into().unwrap())
+}
+
+struct IgeEncrypt<'a> {
+    data: &'a mut [u8],
+    iv: &'a [u8],
+}
+
+impl BlockSizeUser for IgeEncrypt<'_> {
+    type BlockSize = U16;
+}
+
+impl BlockClosure for IgeEncrypt<'_> {
+    fn call<B: BlockBackend<BlockSize = U16>>(self, backend: &mut B) {
+        let mut iv1 = word_at(self.iv, 0);
+        let mut iv2 = word_at(self.iv, 16);
+
+        for chunk in self.data.chunks_exact_mut(16) {
+            let plain = u128::from_ne_bytes(chunk.try_into().unwrap());
+            let mut block = AesBlock::from((plain ^ iv1).to_ne_bytes());
+            backend.proc_block(InOut::from(&mut block));
+            let out = u128::from_ne_bytes(block.into()) ^ iv2;
+            chunk.copy_from_slice(&out.to_ne_bytes());
+            iv1 = out;
+            iv2 = plain;
+        }
     }
 }
 
-#[inline(always)]
-fn xor_blocks(a: &mut AesBlock, b: &AesBlock) {
-    for (ai, &bi) in a.iter_mut().zip(b.iter()) {
-        *ai ^= bi;
+struct IgeDecrypt<'a> {
+    data: &'a mut [u8],
+    iv: &'a [u8],
+}
+
+impl BlockSizeUser for IgeDecrypt<'_> {
+    type BlockSize = U16;
+}
+
+impl BlockClosure for IgeDecrypt<'_> {
+    fn call<B: BlockBackend<BlockSize = U16>>(self, backend: &mut B) {
+        let mut iv1 = word_at(self.iv, 16);
+        let mut iv2 = word_at(self.iv, 0);
+
+        for chunk in self.data.chunks_exact_mut(16) {
+            let ct = u128::from_ne_bytes(chunk.try_into().unwrap());
+            let mut block = AesBlock::from((ct ^ iv1).to_ne_bytes());
+            backend.proc_block(InOut::from(&mut block));
+            let out = u128::from_ne_bytes(block.into()) ^ iv2;
+            chunk.copy_from_slice(&out.to_ne_bytes());
+            iv1 = out;
+            iv2 = ct;
+        }
     }
 }
 
 fn ige256_encrypt_slice(data: &mut [u8], cipher: &Aes256, iv: &[u8]) {
-    let mut iv1 = block_from_slice(&iv[..16]);
-    let mut iv2 = block_from_slice(&iv[16..]);
-    for chunk in data.chunks_exact_mut(16) {
-        let plain = block_from_slice(chunk);
-        let mut block = plain;
-        xor_blocks(&mut block, &iv1);
-        cipher.encrypt_block(&mut block);
-        xor_blocks(&mut block, &iv2);
-        chunk.copy_from_slice(&block);
-        iv1 = block;
-        iv2 = plain;
-    }
+    cipher.encrypt_with_backend(IgeEncrypt { data, iv });
 }
 
 fn ige256_decrypt_slice(data: &mut [u8], cipher: &Aes256, iv: &[u8]) {
-    let mut iv1 = block_from_slice(&iv[16..]);
-    let mut iv2 = block_from_slice(&iv[..16]);
-    for chunk in data.chunks_exact_mut(16) {
-        let cipher_block = block_from_slice(chunk);
-        let mut block = iv1;
-        xor_blocks(&mut block, &cipher_block);
-        cipher.decrypt_block(&mut block);
-        xor_blocks(&mut block, &iv2);
-        chunk.copy_from_slice(&block);
-        iv1 = block;
-        iv2 = cipher_block;
-    }
+    cipher.decrypt_with_backend(IgeDecrypt { data, iv });
 }
 
 const KDF_A_LO: usize = 0;
@@ -103,61 +125,87 @@ fn ctr_next(ctr: &mut [u8; 16]) {
     }
 }
 
-fn ctr_process(data: &mut [u8], cipher: &Aes256, ctr: &mut [u8; 16], state: &mut usize) {
-    let len = data.len();
-    if len == 0 { return; }
+struct CtrProcess<'a> {
+    data: &'a mut [u8],
+    ctr: &'a mut [u8; 16],
+    state: &'a mut usize,
+}
 
-    let mut pos = 0;
+impl BlockSizeUser for CtrProcess<'_> {
+    type BlockSize = U16;
+}
 
-    if *state != 0 {
-        let mut ks = block_from_slice(ctr);
-        cipher.encrypt_block(&mut ks);
-        let take = (16 - *state).min(len);
-        for i in 0..take {
-            data[pos + i] ^= ks[*state + i];
+impl BlockClosure for CtrProcess<'_> {
+    fn call<B: BlockBackend<BlockSize = U16>>(self, backend: &mut B) {
+        let data = self.data;
+        let ctr = self.ctr;
+        let state = self.state;
+
+        let len = data.len();
+        if len == 0 { return; }
+
+        let mut pos = 0;
+
+        if *state != 0 {
+            let mut ks = block_from_slice(ctr);
+            backend.proc_block(InOut::from(&mut ks));
+            let take = (16 - *state).min(len);
+            for i in 0..take {
+                data[pos + i] ^= ks[*state + i];
+            }
+            pos += take;
+            *state += take;
+            if *state == 16 {
+                *state = 0;
+                ctr_next(ctr);
+            }
+            if pos == len { return; }
         }
-        pos += take;
-        *state += take;
-        if *state == 16 {
-            *state = 0;
+
+        const WIDE: usize = 8;
+
+        let mut wide = data[pos..].chunks_exact_mut(WIDE * 16);
+        for group in &mut wide {
+            let mut ks = [AesBlock::default(); WIDE];
+            for k in ks.iter_mut() {
+                *k = block_from_slice(ctr);
+                ctr_next(ctr);
+            }
+            for k in ks.iter_mut() {
+                backend.proc_block(InOut::from(k));
+            }
+            for (i, k) in ks.iter().enumerate() {
+                let at = i * 16;
+                let x = u128::from_ne_bytes(group[at..at + 16].try_into().unwrap())
+                    ^ u128::from_ne_bytes((*k).into());
+                group[at..at + 16].copy_from_slice(&x.to_ne_bytes());
+            }
+        }
+
+        let mut chunks = wide.into_remainder().chunks_exact_mut(16);
+        for chunk in &mut chunks {
+            let mut ks = block_from_slice(ctr);
+            backend.proc_block(InOut::from(&mut ks));
+            let x = u128::from_ne_bytes(chunk.try_into().unwrap())
+                ^ u128::from_ne_bytes(ks.into());
+            chunk.copy_from_slice(&x.to_ne_bytes());
             ctr_next(ctr);
         }
-        if pos == len { return; }
-    }
+        let tail = chunks.into_remainder();
 
-    let mut chunks4 = data[pos..].chunks_exact_mut(64);
-    for quad in &mut chunks4 {
-        let mut k0 = block_from_slice(ctr); ctr_next(ctr);
-        let mut k1 = block_from_slice(ctr); ctr_next(ctr);
-        let mut k2 = block_from_slice(ctr); ctr_next(ctr);
-        let mut k3 = block_from_slice(ctr); ctr_next(ctr);
-        cipher.encrypt_block(&mut k0);
-        cipher.encrypt_block(&mut k1);
-        cipher.encrypt_block(&mut k2);
-        cipher.encrypt_block(&mut k3);
-        xor_bytes(&mut quad[0..16], &k0);
-        xor_bytes(&mut quad[16..32], &k1);
-        xor_bytes(&mut quad[32..48], &k2);
-        xor_bytes(&mut quad[48..64], &k3);
-    }
-    let remainder = chunks4.into_remainder();
-    let mut chunks = remainder.chunks_exact_mut(16);
-    for chunk in &mut chunks {
-        let mut ks = block_from_slice(ctr);
-        cipher.encrypt_block(&mut ks);
-        xor_bytes(chunk, &ks);
-        ctr_next(ctr);
-    }
-    let tail = chunks.into_remainder();
-
-    if !tail.is_empty() {
-        let mut ks = block_from_slice(ctr);
-        cipher.encrypt_block(&mut ks);
-        for i in 0..tail.len() {
-            tail[i] ^= ks[i];
+        if !tail.is_empty() {
+            let mut ks = block_from_slice(ctr);
+            backend.proc_block(InOut::from(&mut ks));
+            for i in 0..tail.len() {
+                tail[i] ^= ks[i];
+            }
+            *state = tail.len();
         }
-        *state = tail.len();
     }
+}
+
+fn ctr_process(data: &mut [u8], cipher: &Aes256, ctr: &mut [u8; 16], state: &mut usize) {
+    cipher.encrypt_with_backend(CtrProcess { data, ctr, state });
 }
 
 #[pyfunction]
@@ -375,26 +423,21 @@ fn kdf(auth_key: &[u8], msg_key: &[u8], outgoing: bool) -> PyResult<(Vec<u8>, Ve
 }
 
 #[pyfunction]
-fn pack_message(py: Python<'_>, msg_id: i64, seq_no: i32, body: &[u8], salt: i64, session_id: &[u8], auth_key: &[u8], auth_key_id: &[u8]) -> PyResult<Vec<u8>> {
+fn pack_message<'py>(py: Python<'py>, msg_id: i64, seq_no: i32, body: &[u8], salt: i64, session_id: &[u8], auth_key: &[u8], auth_key_id: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
     if auth_key.len() != 256 { return Err(PyValueError::new_err("auth_key must be 256 bytes")); }
     if auth_key_id.len() != 8 { return Err(PyValueError::new_err("auth_key_id must be 8 bytes")); }
-    let body = body.to_vec();
-    let session_id = session_id.to_vec();
-    let auth_key = auth_key.to_vec();
-    let auth_key_id = auth_key_id.to_vec();
+    let body_len = body.len();
+    let inner_len = 8 + 8 + 8 + 4 + 4 + body_len;
+    let total_plain = (inner_len + 12 + 15) & !15;
+    let total_out = 24 + total_plain;
 
-    Ok(py.detach(move || {
-        let body_len = body.len();
-        let inner_len = 8 + 8 + 8 + 4 + 4 + body_len;
-        let total_plain = (inner_len + 12 + 15) & !15;
-        let total_out = 24 + total_plain;
-        let mut out = vec![0u8; total_out];
+    let mut out = vec![0u8; total_out];
+    {
         let plain = &mut out[24..];
-
         let (salt_slice, rest) = plain.split_at_mut(8);
         salt_slice.copy_from_slice(&(salt as u64).to_le_bytes());
         let (sid, rest) = rest.split_at_mut(8);
-        sid.copy_from_slice(&session_id);
+        sid.copy_from_slice(session_id);
         let (mid, rest) = rest.split_at_mut(8);
         mid.copy_from_slice(&(msg_id as u64).to_le_bytes());
         let (sn, rest) = rest.split_at_mut(4);
@@ -402,8 +445,15 @@ fn pack_message(py: Python<'_>, msg_id: i64, seq_no: i32, body: &[u8], salt: i64
         let (lenb, rest) = rest.split_at_mut(4);
         lenb.copy_from_slice(&(body_len as u32).to_le_bytes());
         let (data_slice, padding) = rest.split_at_mut(body_len);
-        data_slice.copy_from_slice(&body);
+        data_slice.copy_from_slice(body);
         let _ = getrandom::getrandom(padding);
+    }
+
+    let auth_key = auth_key.to_vec();
+    let auth_key_id = auth_key_id.to_vec();
+
+    let out = py.detach(move || {
+        let mut out = out;
 
         // https://core.telegram.org/mtproto/description
         // msg_key = SHA256(auth_key[88+x:88+x+32] + plaintext)[8:24]
@@ -411,24 +461,26 @@ fn pack_message(py: Python<'_>, msg_id: i64, seq_no: i32, body: &[u8], salt: i64
         let msg_key_large = {
             let mut h = Sha256::new();
             h.update(&auth_key[MSG_KEY_AUTH_LO..MSG_KEY_AUTH_HI]);
-            h.update(&plain[..total_plain]);
+            h.update(&out[24..24 + total_plain]);
             h.finalize()
         };
-        let msg_key = &msg_key_large[8..24];
+        let msg_key: [u8; 16] = msg_key_large[8..24].try_into().unwrap();
 
-        let (aes_key, aes_iv) = kdf_inner(&auth_key, msg_key, 0);
+        let (aes_key, aes_iv) = kdf_inner(&auth_key, &msg_key, 0);
         let cipher = Aes256::new_from_slice(&aes_key).unwrap();
         ige256_encrypt_slice(&mut out[24..], &cipher, &aes_iv);
 
         out[..8].copy_from_slice(&auth_key_id);
-        out[8..24].copy_from_slice(msg_key);
+        out[8..24].copy_from_slice(&msg_key);
         out
-    }))
+    });
+
+    Ok(PyBytes::new(py, &out))
 }
 
 #[pyfunction]
 #[pyo3(signature = (packed, session_id, auth_key, auth_key_id, incoming=true))]
-fn unpack_message(py: Python<'_>, packed: &[u8], session_id: &[u8], auth_key: &[u8], auth_key_id: &[u8], incoming: bool) -> PyResult<(i64, i32, i32, Vec<u8>, i32)> {
+fn unpack_message<'py>(py: Python<'py>, packed: &[u8], session_id: &[u8], auth_key: &[u8], auth_key_id: &[u8], incoming: bool) -> PyResult<(i64, i32, i32, Bound<'py, PyBytes>, i32)> {
     if auth_key.len() != 256 { return Err(PyValueError::new_err("auth_key must be 256 bytes")); }
     if auth_key_id.len() != 8 { return Err(PyValueError::new_err("auth_key_id must be 8 bytes")); }
     if packed.len() < 24 {
@@ -437,18 +489,16 @@ fn unpack_message(py: Python<'_>, packed: &[u8], session_id: &[u8], auth_key: &[
     if &packed[..8] != auth_key_id {
         return Err(PyValueError::new_err("auth_key_id mismatch"));
     }
-    let packed = packed.to_vec();
+    let msg_key: [u8; 16] = packed[8..24].try_into().unwrap();
+    let mut dec = packed[24..].to_vec();
     let session_id = session_id.to_vec();
     let auth_key = auth_key.to_vec();
     let x: usize = if incoming { 8 } else { 0 };
 
-    py.detach(move || {
-        let msg_key = &packed[8..24];
-        let encrypted = &packed[24..];
-
-        let (aes_key, aes_iv) = kdf_inner(&auth_key, msg_key, x);
+    let (msg_id, seq_no, length, total_len, dec) = py.detach(
+        move || -> PyResult<(i64, i32, usize, i32, Vec<u8>)> {
+        let (aes_key, aes_iv) = kdf_inner(&auth_key, &msg_key, x);
         let cipher = Aes256::new_from_slice(&aes_key).unwrap();
-        let mut dec = encrypted.to_vec();
         ige256_decrypt_slice(&mut dec, &cipher, &aes_iv);
 
         if dec.len() < 32 {
@@ -471,7 +521,7 @@ fn unpack_message(py: Python<'_>, packed: &[u8], session_id: &[u8], auth_key: &[
             h.update(&dec);
             h.finalize()
         };
-        if &msg_key_check[8..24] != msg_key {
+        if msg_key_check[8..24] != msg_key {
             return Err(PyValueError::new_err("msg_key mismatch"));
         }
 
@@ -489,10 +539,12 @@ fn unpack_message(py: Python<'_>, packed: &[u8], session_id: &[u8], auth_key: &[
         if 32 + length > dec.len() {
             return Err(PyValueError::new_err("body length exceeds decrypted data"));
         }
-        let body = dec[32..32 + length].to_vec();
         let total_len = dec[16..].len() as i32;
-        Ok((msg_id, seq_no, length as i32, body, total_len))
-    })
+        Ok((msg_id, seq_no, length, total_len, dec))
+    })?;
+
+    let body = PyBytes::new(py, &dec[32..32 + length]);
+    Ok((msg_id, seq_no, length as i32, body, total_len))
 }
 
 #[pymodule]

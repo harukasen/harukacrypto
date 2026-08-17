@@ -8,6 +8,23 @@ use pyo3::prelude::*;
 use pyo3::types::{PyByteArray, PyBytes};
 use sha2::{Digest, Sha256};
 
+thread_local! {
+    static SCRATCH: std::cell::RefCell<Vec<u8>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+const SCRATCH_KEEP: usize = 2 * 1024 * 1024;
+
+fn scratch_take() -> Vec<u8> {
+    SCRATCH.with(|s| std::mem::take(&mut *s.borrow_mut()))
+}
+
+fn scratch_put(buf: Vec<u8>) {
+    if buf.capacity() <= SCRATCH_KEEP {
+        SCRATCH.with(|s| *s.borrow_mut() = buf);
+    }
+}
+
 type AesBlock = GenericArray<u8, U16>;
 
 #[inline(always)]
@@ -209,47 +226,59 @@ fn ctr_process(data: &mut [u8], cipher: &Aes256, ctr: &mut [u8; 16], state: &mut
 }
 
 #[pyfunction]
-fn ige256_encrypt(py: Python<'_>, data: &[u8], key: &[u8], iv: &[u8]) -> PyResult<Vec<u8>> {
+fn ige256_encrypt<'py>(py: Python<'py>, data: &[u8], key: &[u8], iv: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
     if key.len() != 32 { return Err(PyValueError::new_err("Key must be 32 bytes")); }
     if iv.len() != 32 { return Err(PyValueError::new_err("IV must be 32 bytes")); }
-    let data = data.to_vec();
+    let mut buf = scratch_take();
+    buf.clear();
+    buf.extend_from_slice(data);
     let key = key.to_vec();
     let iv = iv.to_vec();
-    Ok(py.detach(move || {
+    let buf = py.detach(move || {
         let cipher = Aes256::new_from_slice(&key).unwrap();
-        let mut buf = data;
+        let mut buf = buf;
         ige256_encrypt_slice(&mut buf, &cipher, &iv);
         buf
-    }))
+    });
+    let out = PyBytes::new(py, &buf);
+    scratch_put(buf);
+    Ok(out)
 }
 
 #[pyfunction]
-fn ige256_decrypt(py: Python<'_>, data: &[u8], key: &[u8], iv: &[u8]) -> PyResult<Vec<u8>> {
+fn ige256_decrypt<'py>(py: Python<'py>, data: &[u8], key: &[u8], iv: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
     if key.len() != 32 { return Err(PyValueError::new_err("Key must be 32 bytes")); }
     if iv.len() != 32 { return Err(PyValueError::new_err("IV must be 32 bytes")); }
-    let data = data.to_vec();
+    let mut buf = scratch_take();
+    buf.clear();
+    buf.extend_from_slice(data);
     let key = key.to_vec();
     let iv = iv.to_vec();
-    Ok(py.detach(move || {
+    let buf = py.detach(move || {
         let cipher = Aes256::new_from_slice(&key).unwrap();
-        let mut buf = data;
+        let mut buf = buf;
         ige256_decrypt_slice(&mut buf, &cipher, &iv);
         buf
-    }))
+    });
+    let out = PyBytes::new(py, &buf);
+    scratch_put(buf);
+    Ok(out)
 }
 
 #[pyfunction]
-fn ctr256_encrypt(
-    py: Python<'_>,
-    data: &[u8],
+fn ctr256_encrypt<'py>(
+    py: Python<'py>,
+    src: &[u8],
     key: &[u8],
     iv: &Bound<'_, PyByteArray>,
     state: &Bound<'_, PyByteArray>,
-) -> PyResult<Vec<u8>> {
+) -> PyResult<Bound<'py, PyBytes>> {
     if key.len() != 32 { return Err(PyValueError::new_err("Key must be 32 bytes")); }
     if iv.len() != 16 { return Err(PyValueError::new_err("IV must be 16 bytes")); }
 
-    let data = data.to_vec();
+    let mut data = scratch_take();
+    data.clear();
+    data.extend_from_slice(src);
     let key = key.to_vec();
     let mut ctr = [0u8; 16];
     unsafe {
@@ -269,18 +298,20 @@ fn ctr256_encrypt(
         iv.as_bytes_mut().copy_from_slice(&ctr_out);
         state.as_bytes_mut()[0] = state_out as u8;
     }
-    Ok(buf)
+    let out = PyBytes::new(py, &buf);
+    scratch_put(buf);
+    Ok(out)
 }
 
 #[pyfunction]
-fn ctr256_decrypt(
-    py: Python<'_>,
-    data: &[u8],
+fn ctr256_decrypt<'py>(
+    py: Python<'py>,
+    src: &[u8],
     key: &[u8],
     iv: &Bound<'_, PyByteArray>,
     state: &Bound<'_, PyByteArray>,
-) -> PyResult<Vec<u8>> {
-    ctr256_encrypt(py, data, key, iv, state)
+) -> PyResult<Bound<'py, PyBytes>> {
+    ctr256_encrypt(py, src, key, iv, state)
 }
 
 /// In-place CTR encrypt: copies data out, processes, writes back.
@@ -431,7 +462,9 @@ fn pack_message<'py>(py: Python<'py>, msg_id: i64, seq_no: i32, body: &[u8], sal
     let total_plain = (inner_len + 12 + 15) & !15;
     let total_out = 24 + total_plain;
 
-    let mut out = vec![0u8; total_out];
+    let mut out = scratch_take();
+    out.clear();
+    out.resize(total_out, 0);
     {
         let plain = &mut out[24..];
         let (salt_slice, rest) = plain.split_at_mut(8);
@@ -475,7 +508,9 @@ fn pack_message<'py>(py: Python<'py>, msg_id: i64, seq_no: i32, body: &[u8], sal
         out
     });
 
-    Ok(PyBytes::new(py, &out))
+    let packed = PyBytes::new(py, &out);
+    scratch_put(out);
+    Ok(packed)
 }
 
 #[pyfunction]
@@ -490,7 +525,9 @@ fn unpack_message<'py>(py: Python<'py>, packed: &[u8], session_id: &[u8], auth_k
         return Err(PyValueError::new_err("auth_key_id mismatch"));
     }
     let msg_key: [u8; 16] = packed[8..24].try_into().unwrap();
-    let mut dec = packed[24..].to_vec();
+    let mut dec = scratch_take();
+    dec.clear();
+    dec.extend_from_slice(&packed[24..]);
     let session_id = session_id.to_vec();
     let auth_key = auth_key.to_vec();
     let x: usize = if incoming { 8 } else { 0 };
@@ -544,6 +581,7 @@ fn unpack_message<'py>(py: Python<'py>, packed: &[u8], session_id: &[u8], auth_k
     })?;
 
     let body = PyBytes::new(py, &dec[32..32 + length]);
+    scratch_put(dec);
     Ok((msg_id, seq_no, length as i32, body, total_len))
 }
 

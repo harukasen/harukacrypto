@@ -453,6 +453,15 @@ fn kdf(auth_key: &[u8], msg_key: &[u8], outgoing: bool) -> PyResult<(Vec<u8>, Ve
     Ok((key_arr.to_vec(), iv_arr.to_vec()))
 }
 
+/// Return the SHA-256 digest of a byte string.
+///
+/// This helper is an original HarukaCrypto convenience API built on the
+/// existing SHA-256 dependency used by the MTProto implementation.
+#[pyfunction]
+fn sha256_digest(data: &[u8]) -> Vec<u8> {
+    Sha256::digest(data).to_vec()
+}
+
 #[pyfunction]
 fn pack_message<'py>(py: Python<'py>, msg_id: i64, seq_no: i32, body: &[u8], salt: i64, session_id: &[u8], auth_key: &[u8], auth_key_id: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
     if auth_key.len() != 256 { return Err(PyValueError::new_err("auth_key must be 256 bytes")); }
@@ -586,7 +595,7 @@ fn unpack_message<'py>(py: Python<'py>, packed: &[u8], session_id: &[u8], auth_k
 }
 
 #[pymodule]
-fn warpcrypto(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn harukacrypto(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ige256_encrypt, m)?)?;
     m.add_function(wrap_pyfunction!(ige256_decrypt, m)?)?;
     m.add_function(wrap_pyfunction!(ctr256_encrypt, m)?)?;
@@ -596,6 +605,7 @@ fn warpcrypto(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ctr256_encrypt_batch, m)?)?;
     m.add_function(wrap_pyfunction!(ctr256_decrypt_batch, m)?)?;
     m.add_function(wrap_pyfunction!(kdf, m)?)?;
+    m.add_function(wrap_pyfunction!(sha256_digest, m)?)?;
     m.add_function(wrap_pyfunction!(pack_message, m)?)?;
     m.add_function(wrap_pyfunction!(unpack_message, m)?)?;
     Ok(())

@@ -1,7 +1,7 @@
 import os
 import unittest
 
-import warpcrypto
+import harukacrypto
 
 
 class TestBindings(unittest.TestCase):
@@ -9,10 +9,10 @@ class TestBindings(unittest.TestCase):
         required = [
             "ige256_encrypt", "ige256_decrypt",
             "ctr256_encrypt", "ctr256_decrypt",
-            "kdf", "pack_message", "unpack_message",
+            "kdf", "pack_message", "unpack_message", "sha256_digest",
         ]
         for name in required:
-            self.assertTrue(hasattr(warpcrypto, name), f"Missing: {name}")
+            self.assertTrue(hasattr(harukacrypto, name), f"Missing: {name}")
 
 
 class TestIGE256(unittest.TestCase):
@@ -21,25 +21,25 @@ class TestIGE256(unittest.TestCase):
         iv = os.urandom(32)
         for size in [16, 32, 48, 64, 128, 1024, 1048576]:
             pt = os.urandom(size)
-            ct = warpcrypto.ige256_encrypt(pt, key, iv)
-            dec = warpcrypto.ige256_decrypt(ct, key, iv)
+            ct = harukacrypto.ige256_encrypt(pt, key, iv)
+            dec = harukacrypto.ige256_decrypt(ct, key, iv)
             self.assertEqual(dec, pt, f"IGE roundtrip failed at size={size}")
 
     def test_ige256_encrypt_wrong_key_size(self):
         with self.assertRaises(ValueError):
-            warpcrypto.ige256_encrypt(b"\x00" * 16, b"\x00" * 31, b"\x00" * 32)
+            harukacrypto.ige256_encrypt(b"\x00" * 16, b"\x00" * 31, b"\x00" * 32)
 
     def test_ige256_encrypt_wrong_iv_size(self):
         with self.assertRaises(ValueError):
-            warpcrypto.ige256_encrypt(b"\x00" * 16, b"\x00" * 32, b"\x00" * 31)
+            harukacrypto.ige256_encrypt(b"\x00" * 16, b"\x00" * 32, b"\x00" * 31)
 
     def test_ige256_decrypt_wrong_key_size(self):
         with self.assertRaises(ValueError):
-            warpcrypto.ige256_decrypt(b"\x00" * 16, b"\x00" * 31, b"\x00" * 32)
+            harukacrypto.ige256_decrypt(b"\x00" * 16, b"\x00" * 31, b"\x00" * 32)
 
     def test_ige256_decrypt_wrong_iv_size(self):
         with self.assertRaises(ValueError):
-            warpcrypto.ige256_decrypt(b"\x00" * 16, b"\x00" * 32, b"\x00" * 31)
+            harukacrypto.ige256_decrypt(b"\x00" * 16, b"\x00" * 32, b"\x00" * 31)
 
 
 class TestCTR256(unittest.TestCase):
@@ -50,10 +50,10 @@ class TestCTR256(unittest.TestCase):
             orig_iv = bytearray(os.urandom(16))
 
             iv1 = bytearray(orig_iv)
-            enc = warpcrypto.ctr256_encrypt(pt, key, iv1, bytearray(1))
+            enc = harukacrypto.ctr256_encrypt(pt, key, iv1, bytearray(1))
 
             iv2 = bytearray(orig_iv)
-            dec = warpcrypto.ctr256_decrypt(enc, key, iv2, bytearray(1))
+            dec = harukacrypto.ctr256_decrypt(enc, key, iv2, bytearray(1))
 
             self.assertEqual(dec, pt, f"CTR roundtrip failed at size={size}")
 
@@ -63,8 +63,8 @@ class TestCTR256(unittest.TestCase):
             pt = os.urandom(size)
             orig_iv = bytearray(os.urandom(16))
             iv1 = bytearray(orig_iv)
-            double = warpcrypto.ctr256_encrypt(
-                warpcrypto.ctr256_encrypt(pt, key, iv1, bytearray(1)),
+            double = harukacrypto.ctr256_encrypt(
+                harukacrypto.ctr256_encrypt(pt, key, iv1, bytearray(1)),
                 key, bytearray(orig_iv), bytearray(1),
             )
             self.assertEqual(double, pt, f"CTR double encrypt != original at size={size}")
@@ -82,8 +82,8 @@ class TestCTR256(unittest.TestCase):
             iv_w = bytearray(orig_iv)
             st_w = bytearray(1)
 
-            r1_w = warpcrypto.ctr256_encrypt(d1, key, iv_w, st_w)
-            r2_w = warpcrypto.ctr256_encrypt(d2, key, iv_w, st_w)
+            r1_w = harukacrypto.ctr256_encrypt(d1, key, iv_w, st_w)
+            r2_w = harukacrypto.ctr256_encrypt(d2, key, iv_w, st_w)
 
             self.assertIsInstance(r1_w, bytes)
             self.assertIsInstance(r2_w, bytes)
@@ -94,13 +94,13 @@ class TestCTR256(unittest.TestCase):
         key = os.urandom(32)
         iv = bytearray(os.urandom(16))
         iv_original = list(iv)
-        _ = warpcrypto.ctr256_encrypt(b"\x00" * 32, key, iv, bytearray(1))
+        _ = harukacrypto.ctr256_encrypt(b"\x00" * 32, key, iv, bytearray(1))
         self.assertNotEqual(list(iv), iv_original, "IV should be mutated after CTR call")
 
     def test_ctr256_state_mutated(self):
         key = os.urandom(32)
         state = bytearray(1)
-        _ = warpcrypto.ctr256_encrypt(b"\x00" * 10, key, bytearray(os.urandom(16)), state)
+        _ = harukacrypto.ctr256_encrypt(b"\x00" * 10, key, bytearray(os.urandom(16)), state)
         self.assertNotEqual(list(state), [0], "State should be mutated after CTR call")
 
 
@@ -109,15 +109,15 @@ class TestKDF(unittest.TestCase):
         auth_key = os.urandom(256)
         msg_key = os.urandom(16)
         for outgoing in [True, False]:
-            k, iv = warpcrypto.kdf(auth_key, msg_key, outgoing)
+            k, iv = harukacrypto.kdf(auth_key, msg_key, outgoing)
             self.assertEqual(len(k), 32)
             self.assertEqual(len(iv), 32)
 
     def test_kdf_outgoing_vs_incoming(self):
         auth_key = os.urandom(256)
         msg_key = os.urandom(16)
-        k_out, iv_out = warpcrypto.kdf(auth_key, msg_key, True)
-        k_in, iv_in = warpcrypto.kdf(auth_key, msg_key, False)
+        k_out, iv_out = harukacrypto.kdf(auth_key, msg_key, True)
+        k_in, iv_in = harukacrypto.kdf(auth_key, msg_key, False)
         self.assertNotEqual(k_out, k_in)
         self.assertNotEqual(iv_out, iv_in)
 
@@ -129,7 +129,7 @@ class TestPackMessage(unittest.TestCase):
     SALT = 1234567890
 
     def pack(self, body: bytes, msg_id: int = 0, seq_no: int = 0):
-        return warpcrypto.pack_message(msg_id, seq_no, body, self.SALT, self.SESSION_ID, self.AUTH_KEY, self.AUTH_KEY_ID)
+        return harukacrypto.pack_message(msg_id, seq_no, body, self.SALT, self.SESSION_ID, self.AUTH_KEY, self.AUTH_KEY_ID)
 
     def test_pack_has_auth_key_id(self):
         packed = self.pack(b"test")
@@ -165,13 +165,13 @@ class TestUnpackMessage(unittest.TestCase):
     SALT = 1234567890
 
     def pack(self, body: bytes, msg_id: int = 0, seq_no: int = 0):
-        return warpcrypto.pack_message(msg_id, seq_no, body, self.SALT, self.SESSION_ID, self.AUTH_KEY, self.AUTH_KEY_ID)
+        return harukacrypto.pack_message(msg_id, seq_no, body, self.SALT, self.SESSION_ID, self.AUTH_KEY, self.AUTH_KEY_ID)
 
     def test_unpack_roundtrip(self):
         payload = os.urandom(50)
         packed = self.pack(payload, msg_id=42, seq_no=7)
         # outgoing=False because pack uses x=0 (client→server), so unpack must also use x=0
-        msg_id, seq_no, length, body, total_len = warpcrypto.unpack_message(
+        msg_id, seq_no, length, body, total_len = harukacrypto.unpack_message(
             packed, self.SESSION_ID, self.AUTH_KEY, self.AUTH_KEY_ID, incoming=False
         )
         self.assertEqual(msg_id, 42)
@@ -187,7 +187,7 @@ class TestUnpackMessage(unittest.TestCase):
         packed = self.pack(payload, msg_id=99, seq_no=3)
         # This should NOT match because pack uses auth_key[88:120], unpack(incoming=True) uses [96:128]
         with self.assertRaises(ValueError):
-            warpcrypto.unpack_message(
+            harukacrypto.unpack_message(
                 packed, self.SESSION_ID, self.AUTH_KEY, self.AUTH_KEY_ID, incoming=True
             )
 
@@ -195,17 +195,17 @@ class TestUnpackMessage(unittest.TestCase):
         packed = self.pack(b"test")
         bad_key_id = os.urandom(8)
         with self.assertRaises(ValueError):
-            warpcrypto.unpack_message(packed, self.SESSION_ID, self.AUTH_KEY, bad_key_id)
+            harukacrypto.unpack_message(packed, self.SESSION_ID, self.AUTH_KEY, bad_key_id)
 
     def test_unpack_invalid_session_id(self):
         packed = self.pack(b"test")
         bad_sid = os.urandom(8)
         with self.assertRaises(ValueError):
-            warpcrypto.unpack_message(packed, bad_sid, self.AUTH_KEY, self.AUTH_KEY_ID)
+            harukacrypto.unpack_message(packed, bad_sid, self.AUTH_KEY, self.AUTH_KEY_ID)
 
     def test_unpack_too_short(self):
         with self.assertRaises(ValueError):
-            warpcrypto.unpack_message(b"", self.SESSION_ID, self.AUTH_KEY, self.AUTH_KEY_ID)
+            harukacrypto.unpack_message(b"", self.SESSION_ID, self.AUTH_KEY, self.AUTH_KEY_ID)
 
     def test_unpack_tampered_body(self):
         payload = b"hello"
@@ -213,7 +213,7 @@ class TestUnpackMessage(unittest.TestCase):
         # Flip a bit in the encrypted portion
         packed[30] ^= 0x01
         with self.assertRaises(ValueError):
-            warpcrypto.unpack_message(bytes(packed), self.SESSION_ID, self.AUTH_KEY, self.AUTH_KEY_ID)
+            harukacrypto.unpack_message(bytes(packed), self.SESSION_ID, self.AUTH_KEY, self.AUTH_KEY_ID)
 
     def test_unpack_wrong_msg_key(self):
         payload = b"test"
@@ -221,7 +221,7 @@ class TestUnpackMessage(unittest.TestCase):
         # Flip a bit in the msg_key
         packed[10] ^= 0x01
         with self.assertRaises(ValueError):
-            warpcrypto.unpack_message(bytes(packed), self.SESSION_ID, self.AUTH_KEY, self.AUTH_KEY_ID)
+            harukacrypto.unpack_message(bytes(packed), self.SESSION_ID, self.AUTH_KEY, self.AUTH_KEY_ID)
 
 
 if __name__ == "__main__":

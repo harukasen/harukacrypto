@@ -1,10 +1,10 @@
 [package]
-name = "warpcrypto"
+name = "harukacrypto"
 version = "2.0.6"
 edition = "2024"
 
 [lib]
-name = "warpcrypto"
+name = "harukacrypto"
 crate-type = ["cdylib"]
 
 [dependencies]

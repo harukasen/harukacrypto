@@ -1,5 +1,5 @@
-WarpCrypto - Fast and Portable Cryptography Extension Library
-Forked from TgCrypto / Pyrogram
+HarukaCrypto - Fast MTProto Cryptography Extension Library
+HarukaCrypto is derived from WarpCrypto (https://github.com/rjriajul/WarpCrypto), which was forked from TgCrypto / Pyrogram
 Original Copyright (C) 2017-present Dan <https://github.com/delivrance>
 
 This library is free software: you can redistribute it and/or modify

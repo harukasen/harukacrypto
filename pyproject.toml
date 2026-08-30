@@ -3,12 +3,12 @@ requires = ["maturin>=1.14,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "WarpCrypto"
+name = "HarukaCrypto"
 version = "2.0.6"
-description = "Fast and Portable Cryptography Extension Library (Rust)"
+description = "Fast MTProto cryptography extension for Python, implemented in Rust"
 readme = "README.md"
 requires-python = ">=3.8"
-authors = [{ name = "Riajul" }]
+authors = [{ name = "HarukaCrypto contributors" }]
 license = "LGPL-3.0-or-later"
 license-files = ["COPYING", "COPYING.lesser"]
 classifiers = [
@@ -35,13 +35,13 @@ classifiers = [
 ]
 keywords = [
     "crypto", "cryptography", "encryption", "mtproto",
-    "rust", "extension", "library", "aes", "warpcrypto",
+    "rust", "extension", "library", "aes", "harukacrypto",
 ]
 
 [project.urls]
-Homepage = "https://github.com/rjriajul/WarpCrypto"
-Source = "https://github.com/rjriajul/WarpCrypto"
-Tracker = "https://github.com/rjriajul/WarpCrypto/issues"
+Homepage = "https://github.com/harukasen/harukacrypto"
+Source = "https://github.com/harukasen/harukacrypto"
+Tracker = "https://github.com/harukasen/harukacrypto/issues"
 
 [tool.maturin]
 features = ["pyo3/extension-module"]

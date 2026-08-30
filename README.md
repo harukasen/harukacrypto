@@ -1,37 +1,26 @@
-# WarpCrypto
+# HarukaCrypto
 
-> Fast Cryptography Extension Library — Rust Implementation
+> Fast MTProto cryptography extension for Python, implemented in Rust.
 
-WarpCrypto is a high-performance cryptography library written in **Rust** as a Python extension (via [PyO3](https://pyo3.rs) + [maturin](https://maturin.rs)).
-It implements the cryptographic algorithms required by Telegram's MTProto protocol:
-
-- **`AES-256-IGE`** — used in [MTProto v2.0](https://core.telegram.org/mtproto)
-- **`AES-256-CTR`** — used for [CDN encrypted files](https://core.telegram.org/cdn)
-- **`kdf`** — key derivation function per MTProto 2.0 spec
-- **`pack_message` / `unpack_message`** — combined KDF+AES-IGE in a single call (1 GIL release vs 3 for tgcrypto)
+HarukaCrypto is an independently maintained derivative of [WarpCrypto](https://github.com/rjriajul/WarpCrypto), retaining its Rust and PyO3 foundation while adding HarukaCrypto-specific APIs and project branding. It provides fast cryptographic primitives used by Telegram's MTProto protocol.
 
 ## Features
 
-- **3–5× faster** than tgcrypto (C extension) in multi-client benchmarks
-- **AES-NI hardware acceleration** via the `aes` crate's runtime CPU feature detection (`cpufeatures`)
-- **Zero-copy** IGE with block-aligned GenericArray operations
-- **Block-based CTR** — processes 16-byte blocks with `chunks_exact_mut`, not byte-by-byte
-- **Proper state propagation** — IV and state bytearrays are mutated in-place matching tgcrypto exactly
-- **Memory safe** — Rust's type system guarantees no buffer overflows, use-after-free, or data races
-- **Zero compiler warnings**
-
-## Requirements
-
-- Python 3.8 or higher
-- Rust toolchain (for building from source; pre-built wheels available for most platforms)
+- AES-256-IGE encryption and decryption.
+- AES-256-CTR streaming operations, including in-place and batch APIs.
+- MTProto 2.0 key derivation and message packing helpers.
+- A `sha256_digest` convenience function added by HarukaCrypto.
+- Rust memory safety, AES hardware acceleration where available, and Python bindings through PyO3.
 
 ## Installation
 
+Install a published wheel when available:
+
 ```bash
-pip install WarpCrypto
+pip install HarukaCrypto
 ```
 
-Install from source:
+Build from source:
 
 ```bash
 pip install maturin
@@ -39,78 +28,39 @@ maturin build --release
 pip install target/wheels/*.whl
 ```
 
-## API
-
-```python
-def ige256_encrypt(data: bytes, key: bytes, iv: bytes) -> bytes: ...
-def ige256_decrypt(data: bytes, key: bytes, iv: bytes) -> bytes: ...
-
-def ctr256_encrypt(data: bytes, key: bytes, iv: bytearray, state: bytearray) -> bytes: ...
-def ctr256_decrypt(data: bytes, key: bytes, iv: bytearray, state: bytearray) -> bytes: ...
-
-def kdf(auth_key: bytes, msg_key: bytes, outgoing: bool) -> tuple[bytes, bytes]: ...
-
-def pack_message(data: bytes, salt: int, session_id: bytes, auth_key: bytes, auth_key_id: bytes) -> bytes: ...
-def unpack_message(packed: bytes, session_id: bytes, auth_key: bytes, auth_key_id: bytes) -> bytes: ...
-```
-
-## Usage
-
-### IGE Mode (MTProto 2.0)
+## Example
 
 ```python
 import os
-import warpcrypto
+import harukacrypto
 
-data = os.urandom(10 * 1024 * 1024)
+payload = os.urandom(1024)
 key = os.urandom(32)
 iv = os.urandom(32)
 
-ige_encrypted = warpcrypto.ige256_encrypt(data, key, iv)
-ige_decrypted = warpcrypto.ige256_decrypt(ige_encrypted, key, iv)
-assert data == ige_decrypted
+ciphertext = harukacrypto.ige256_encrypt(payload, key, iv)
+assert harukacrypto.ige256_decrypt(ciphertext, key, iv) == payload
+assert len(harukacrypto.sha256_digest(payload)) == 32
 ```
 
-### CTR Mode (CDN)
+## API
 
-```python
-import os
-import warpcrypto
+The compatibility API includes `ige256_encrypt`, `ige256_decrypt`, `ctr256_encrypt`, `ctr256_decrypt`, `ctr256_encrypt_inplace`, `ctr256_decrypt_inplace`, `ctr256_encrypt_batch`, `ctr256_decrypt_batch`, `kdf`, `pack_message`, and `unpack_message`. HarukaCrypto additionally exposes `sha256_digest(data)`.
 
-data = os.urandom(10 * 1024 * 1024)
-key = os.urandom(32)
-enc_iv = bytearray(os.urandom(16))
-dec_iv = bytearray(enc_iv)
-
-ctr_encrypted = warpcrypto.ctr256_encrypt(data, key, enc_iv, bytearray(1))
-ctr_decrypted = warpcrypto.ctr256_decrypt(ctr_encrypted, key, dec_iv, bytearray(1))
-assert data == ctr_decrypted
-```
-
-### KDF (MTProto 2.0 key derivation)
-
-```python
-import warpcrypto
-
-auth_key = bytes(range(256))
-msg_key = os.urandom(16)
-
-aes_key, aes_iv = warpcrypto.kdf(auth_key, msg_key, outgoing=True)   # x=0
-aes_key, aes_iv = warpcrypto.kdf(auth_key, msg_key, outgoing=False)  # x=8
-```
-
-## Testing
+## Development and testing
 
 ```bash
-pip install pytest
+pip install maturin pytest
+maturin develop
 pytest
 ```
 
-## Performance
+## Attribution and license
 
-WarpCrypto outperforms tgcrypto (C extension) by **3–5×** across all client counts (1–128 concurrent clients).
-Performance scales with AES-NI availability (most x86_64 and Apple Silicon CPUs).
+HarukaCrypto is derived from [WarpCrypto](https://github.com/rjriajul/WarpCrypto). The upstream project credits its Rust port and the original TgCrypto/Pyrogram work in [NOTICE](NOTICE). Those attribution notices and the applicable LGPL terms are retained in this repository.
 
-## License
+This project is distributed under the **GNU Lesser General Public License v3 or later**. See [COPYING](COPYING) and [COPYING.lesser](COPYING.lesser).
 
-[LGPLv3+](COPYING.lesser) — Originally by Dan. Rust port maintained by Riajul.
+## Project status
+
+This repository is a community-maintained derivative. It is not affiliated with or endorsed by the WarpCrypto maintainers, Telegram, Pyrogram, or TgCrypto.
